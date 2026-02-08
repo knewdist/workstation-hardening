@@ -1,77 +1,138 @@
-# SSH Agent Hardening (Arch Linux + Sway)
+SSH Agent Hardening (Sway / Wayland)
+Goal
 
-## Goal
-Make Git/SSH use your SSH key **without re-entering the passphrase every time**, while keeping the key encrypted on disk and only unlocked in-memory for your session.
+Use an SSH agent so you enter your key passphrase once per session
 
-This doc covers:
-- A simple `ssh-agent` approach (recommended baseline)
-- Optional: systemd user agent
-- Checks + troubleshooting
-- Security notes
+Avoid leaving decrypted keys laying around
 
----
+Keep permissions tight
 
-## Baseline Recommendation
-Use **`ssh-agent`** and load your GitHub key once per login/session using `ssh-add`.
+Prefer per-host keys (e.g., id_ed25519_github) and explicit config
 
-This avoids storing any GitHub token/password for Git operations and keeps your private key encrypted at rest.
-
----
-
-## Prereqs
-- You already have an SSH key (example): `~/.ssh/id_ed25519_github`
-- Your GitHub account has the **public key** added (`~/.ssh/id_ed25519_github.pub`)
-- Your git remote should use SSH (not HTTPS):
-  - `git@github.com:knewdist/<repo>.git`
-
-Check:
-```bash
-git remote -v
-
-
-## Step 1 — Fix Key Permissions
-
-SSH will refuse keys with loose permissions.
-
+1) File permissions (must be correct)
 chmod 700 ~/.ssh
+chmod 600 ~/.ssh/config
 chmod 600 ~/.ssh/id_ed25519_github
 chmod 644 ~/.ssh/id_ed25519_github.pub
 
 
-## Step 2 — Add a GitHub Host Block ####
+If you use other keys, apply the same pattern.
 
-Edit ~/.ssh/config:
+2) Use a dedicated GitHub key in ~/.ssh/config
+
+Create / edit:
+
+vim ~/.ssh/config
+
+
+Example:
 
 Host github.com
   HostName github.com
   User git
   IdentityFile ~/.ssh/id_ed25519_github
   IdentitiesOnly yes
-This forces GitHub to use the correct key (and prevents it from trying other keys).
+  AddKeysToAgent yes
 
 
-## Step 3 — Start ssh-agent automatically in Sway
+Notes:
 
-Add this to ~/.config/sway/config (near the top is fine):
+IdentitiesOnly yes prevents SSH from trying every key it can find.
 
-# --- SSH Agent ---
-exec_always --no-startup-id sh -lc '
-  if [ -z "$SSH_AUTH_SOCK" ]; then
-    eval "$(ssh-agent -s)" >/dev/null
-  fi
-'
+AddKeysToAgent yes helps auto-add once your agent is available.
 
-# Why this works
+3) Start an agent in Sway (recommended socket method)
 
-Ensures an agent exists for your session
+In your Sway config (commonly ~/.config/sway/config), add:
 
-Avoids manually running eval "$(ssh-agent -s)" every boot
+# --- SSH Agent (per-user, socket in XDG runtime dir) ---
+exec_always --no-startup-id ssh-agent -a $XDG_RUNTIME_DIR/ssh-agent.sock
+set $SSH_AUTH_SOCK $XDG_RUNTIME_DIR/ssh-agent.sock
 
-Keeps keys in memory only
 
-Note: This creates the agent dynamically. If you want a fixed socket path, see the “Systemd user agent” option later.
-
-Reload Sway:
+Reload sway:
 
 swaymsg reload
 
+
+Confirm the socket exists:
+
+ls -la "$XDG_RUNTIME_DIR/ssh-agent.sock"
+
+4) Add your GitHub key to the agent
+ssh-add ~/.ssh/id_ed25519_github
+
+
+Verify loaded keys:
+
+ssh-add -l
+
+5) Test GitHub auth
+ssh -T git@github.com
+
+
+Expected: a success message (you may still be prompted the first time per session when adding the key).
+
+6) Make sure your shell is using the same agent socket
+
+If you open new terminals and it “forgets” the agent, export the socket in your shell startup.
+
+For bash: ~/.bashrc
+
+export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.sock"
+
+
+Then:
+
+source ~/.bashrc
+
+7) Security hardening checklist
+✅ Use a passphrase
+
+Make sure the GitHub private key is protected:
+
+ssh-keygen -p -f ~/.ssh/id_ed25519_github
+
+✅ Don’t leave keys world-readable
+
+Re-check:
+
+stat -c "%a %n" ~/.ssh ~/.ssh/id_ed25519_github ~/.ssh/config
+✅ Prefer separate keys for separate purposes
+
+id_ed25519_github → GitHub only
+
+id_ed25519_server_backup → servers
+
+Don’t reuse the same private key everywhere.
+
+✅ Consider agent lifetime limits (optional)
+
+Load key and auto-expire after 1 hour:
+
+ssh-add -t 1h ~/.ssh/id_ed25519_github
+
+8) Troubleshooting
+
+“Still asks me for passphrase every time”
+
+Most common causes:
+
+The agent isn’t running
+
+Your shell isn’t pointing at the right SSH_AUTH_SOCK
+
+Key isn’t added to agent
+
+Quick diag:
+
+echo "$SSH_AUTH_SOCK"
+ssh-add -l
+ps aux | grep ssh-agent | grep -v grep
+
+“Permission denied (publickey)”
+
+Force SSH to use the GitHub key and show debug:
+ssh -vvv -i ~/.ssh/id_ed25519_github git@github.com
+
+Look for which key it actually tries.
