@@ -1,138 +1,236 @@
-SSH Agent Hardening (Sway / Wayland)
-Goal
+# SSH Agent Hardening (Linux Workstations)
 
-Use an SSH agent so you enter your key passphrase once per session
+## Overview
 
-Avoid leaving decrypted keys laying around
+This document describes a hardened approach to using `ssh-agent` on Linux workstations that access infrastructure, servers, or cloud resources.
 
-Keep permissions tight
+The goal is to **reduce SSH private key exposure** while maintaining a usable workflow for administrators and power users.
 
-Prefer per-host keys (e.g., id_ed25519_github) and explicit config
+This guidance applies to **user workstations**, not servers.
 
-1) File permissions (must be correct)
-chmod 700 ~/.ssh
-chmod 600 ~/.ssh/config
-chmod 600 ~/.ssh/id_ed25519_github
-chmod 644 ~/.ssh/id_ed25519_github.pub
+---
 
+## Threat Model
 
-If you use other keys, apply the same pattern.
+### Primary Risks
+- SSH private keys remaining loaded indefinitely
+- Unauthorized processes accessing the SSH agent socket
+- Credential reuse across long-lived desktop sessions
+- Agent forwarding abuse
+- Silent key usage without user awareness
 
-2) Use a dedicated GitHub key in ~/.ssh/config
+### Assumptions
+- The workstation is used interactively
+- SSH keys are passphrase-protected
+- The user may access sensitive infrastructure
+- Physical access is not guaranteed to be trusted
 
-Create / edit:
+---
 
-vim ~/.ssh/config
+## Security Objectives
 
+- Ensure SSH keys are **encrypted at rest**
+- Limit the **lifetime** of loaded keys
+- Restrict **who can access the agent**
+- Avoid exposing SSH credentials to untrusted processes
+- Preserve usability for daily administrative work
 
-Example:
+---
 
-Host github.com
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/id_ed25519_github
-  IdentitiesOnly yes
-  AddKeysToAgent yes
+## Baseline Requirements
 
+Before proceeding, ensure:
 
-Notes:
+- SSH keys are **Ed25519** or stronger
+- All private keys are **passphrase-protected**
+- `openssh` is installed and up to date
 
-IdentitiesOnly yes prevents SSH from trying every key it can find.
+Verify key types:
+```bash
+ssh-keygen -lf ~/.ssh/id_ed25519.pub
 
-AddKeysToAgent yes helps auto-add once your agent is available.
+Agent Strategy
+Key Principles
 
-3) Start an agent in Sway (recommended socket method)
+    One agent per user session
 
-In your Sway config (commonly ~/.config/sway/config), add:
+    Agent socket scoped to the user runtime directory
 
-# --- SSH Agent (per-user, socket in XDG runtime dir) ---
+    Explicit key loading (no silent auto-add)
+
+    No persistent agent across reboots
+
+Agent Initialization (Wayland / Sway / Minimal Desktops)
+
+On lightweight or non-GNOME desktops, the SSH agent should be started explicitly and scoped to the session.
+Recommended Configuration
+
+Add the following to your compositor or session startup file
+(e.g. ~/.config/sway/config or equivalent):
+
+# --- SSH Agent ---
 exec_always --no-startup-id ssh-agent -a $XDG_RUNTIME_DIR/ssh-agent.sock
 set $SSH_AUTH_SOCK $XDG_RUNTIME_DIR/ssh-agent.sock
 
+This ensures:
 
-Reload sway:
+    The socket is created in a user-only directory
 
-swaymsg reload
+    The agent is tied to the active session
 
+    The agent is destroyed on logout
 
-Confirm the socket exists:
+Key Loading Policy
+Manual Key Loading (Recommended)
 
-ls -la "$XDG_RUNTIME_DIR/ssh-agent.sock"
+Keys should be added only when needed:
 
-4) Add your GitHub key to the agent
-ssh-add ~/.ssh/id_ed25519_github
+ssh-add ~/.ssh/id_ed25519
 
+Advantages:
 
-Verify loaded keys:
+    Prevents long-lived credential exposure
+
+    Makes key usage explicit
+
+    Reduces silent abuse
+
+Verify Loaded Keys
 
 ssh-add -l
 
-5) Test GitHub auth
+Key Lifetime Restrictions
+
+To reduce risk from unattended sessions, set a key timeout:
+
+ssh-add -t 1h ~/.ssh/id_ed25519
+
+After expiration, the key is automatically unloaded.
+
+This is strongly recommended for:
+
+    Laptops
+
+    Shared environments
+
+    Admin workstations
+
+SSH Configuration Hardening
+
+Edit ~/.ssh/config:
+
+Host *
+    AddKeysToAgent no
+    ForwardAgent no
+    IdentitiesOnly yes
+
+Rationale
+
+    Prevents automatic key loading
+
+    Blocks agent forwarding by default
+
+    Ensures only explicit keys are used
+
+Agent forwarding should only be enabled per-host, never globally.
+Optional: GNOME Keyring Integration
+
+On GNOME-based systems, gnome-keyring may manage the SSH agent.
+Tradeoffs
+
+Pros
+
+    Automatic key unlock
+
+    Integrated session handling
+
+Cons
+
+    Keys may remain loaded longer than intended
+
+    Reduced visibility into agent state
+
+If using GNOME Keyring:
+
+    Verify SSH_AUTH_SOCK points to the keyring agent
+
+    Ensure keys still have passphrases
+
+    Avoid automatic login without disk encryption
+
+Validation and Testing
+
+Confirm agent socket location:
+
+echo $SSH_AUTH_SOCK
+
+Confirm agent accessibility:
+
+ssh-add -l
+
+Test GitHub authentication:
+
 ssh -T git@github.com
 
+Expected result:
 
-Expected: a success message (you may still be prompted the first time per session when adding the key).
+    Authentication succeeds
 
-6) Make sure your shell is using the same agent socket
+    No password prompt
 
-If you open new terminals and it “forgets” the agent, export the socket in your shell startup.
+    Passphrase requested only when key is first loaded
 
-For bash: ~/.bashrc
+Operational Best Practices
 
-export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.sock"
+    Lock the screen when stepping away
 
+    Reboot after long admin sessions
 
-Then:
+    Avoid reusing keys across unrelated systems
 
-source ~/.bashrc
+    Never copy private keys between machines
 
-7) Security hardening checklist
-✅ Use a passphrase
+    Use separate keys for:
 
-Make sure the GitHub private key is protected:
+        Git hosting
 
-ssh-keygen -p -f ~/.ssh/id_ed25519_github
+        Production servers
 
-✅ Don’t leave keys world-readable
+        Backup systems
 
-Re-check:
+Common Failure Modes
+Issue	Cause	Mitigation
+Agent accessible after logout	Agent started globally	Scope to session
+Key always loaded	Auto-add enabled	Disable AddKeysToAgent
+Silent key usage	Agent forwarding	Disable ForwardAgent
+Repeated passphrase prompts	No agent	Ensure agent is running
+Summary
 
-stat -c "%a %n" ~/.ssh ~/.ssh/id_ed25519_github ~/.ssh/config
-✅ Prefer separate keys for separate purposes
+A hardened SSH agent configuration:
 
-id_ed25519_github → GitHub only
+    Protects private keys
 
-id_ed25519_server_backup → servers
+    Limits credential exposure
 
-Don’t reuse the same private key everywhere.
+    Preserves administrator usability
 
-✅ Consider agent lifetime limits (optional)
+    Aligns with real-world threat models
 
-Load key and auto-expire after 1 hour:
+This configuration is appropriate for:
 
-ssh-add -t 1h ~/.ssh/id_ed25519_github
+    IT staff
 
-8) Troubleshooting
+    MSP technicians
 
-“Still asks me for passphrase every time”
+    Homelab administrators
 
-Most common causes:
+    Security-conscious workstation users
 
-The agent isn’t running
+References
 
-Your shell isn’t pointing at the right SSH_AUTH_SOCK
+    man ssh-agent
 
-Key isn’t added to agent
+    man ssh-add
 
-Quick diag:
+    OpenSSH Security Guidelines
 
-echo "$SSH_AUTH_SOCK"
-ssh-add -l
-ps aux | grep ssh-agent | grep -v grep
-
-“Permission denied (publickey)”
-
-Force SSH to use the GitHub key and show debug:
-ssh -vvv -i ~/.ssh/id_ed25519_github git@github.com
-
-Look for which key it actually tries.
